@@ -1,5 +1,4 @@
-import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, boolean, timestamp, real, jsonb } from "drizzle-orm/pg-core";
+import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -27,61 +26,61 @@ export type EventType = typeof eventTypeEnum[number];
 export const shotResultEnum = ['made', 'missed'] as const;
 export type ShotResult = typeof shotResultEnum[number];
 
-// Tables
-export const users = pgTable("users", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+// Tables — SQLite
+export const users = sqliteTable("users", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   email: text("email").notNull(),
   displayName: text("display_name").notNull(),
   avatarUrl: text("avatar_url"),
-  createdAt: timestamp("created_at").defaultNow(),
+  createdAt: text("created_at").$defaultFn(() => new Date().toISOString()),
 });
 
-export const teams = pgTable("teams", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+export const teams = sqliteTable("teams", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
   name: text("name").notNull(),
-  userId: varchar("user_id").notNull(),
-  createdAt: timestamp("created_at").defaultNow(),
+  userId: text("user_id").notNull(),
+  createdAt: text("created_at").$defaultFn(() => new Date().toISOString()),
 });
 
-export const players = pgTable("players", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  teamId: varchar("team_id").notNull(),
+export const players = sqliteTable("players", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  teamId: text("team_id").notNull(),
   name: text("name").notNull(),
   number: integer("number").notNull(),
   position: text("position").notNull(), // PG/SG/SF/PF/C
-  isActive: boolean("is_active").default(true),
-  createdAt: timestamp("created_at").defaultNow(),
+  isActive: integer("is_active", { mode: "boolean" }).default(true),
+  createdAt: text("created_at").$defaultFn(() => new Date().toISOString()),
 });
 
-export const games = pgTable("games", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  homeTeamId: varchar("home_team_id").notNull(),
-  awayTeamId: varchar("away_team_id").notNull(),
-  userId: varchar("user_id").notNull(),
+export const games = sqliteTable("games", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  homeTeamId: text("home_team_id").notNull(),
+  awayTeamId: text("away_team_id").notNull(),
+  userId: text("user_id").notNull(),
   status: text("status").notNull().default('setup'), // setup/live/paused/completed
   gameFormat: text("game_format").notNull().default('quarters'), // quarters/halves
   periodLength: integer("period_length").notNull().default(10), // minutes
   currentPeriod: integer("current_period").notNull().default(1),
   venue: text("venue"),
   gameDate: text("game_date"),
-  createdAt: timestamp("created_at").defaultNow(),
+  createdAt: text("created_at").$defaultFn(() => new Date().toISOString()),
 });
 
-export const gameEvents = pgTable("game_events", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  gameId: varchar("game_id").notNull(),
-  playerId: varchar("player_id"),
-  teamId: varchar("team_id").notNull(),
+export const gameEvents = sqliteTable("game_events", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  gameId: text("game_id").notNull(),
+  playerId: text("player_id"),
+  teamId: text("team_id").notNull(),
   eventType: text("event_type").notNull(),
   quarter: integer("quarter").notNull(),
   gameClockSeconds: integer("game_clock_seconds"),
   courtX: real("court_x"),
   courtY: real("court_y"),
   shotResult: text("shot_result"), // made/missed/null
-  assistPlayerId: varchar("assist_player_id"),
-  metadata: jsonb("metadata"),
-  createdAt: timestamp("created_at").defaultNow(),
-  isDeleted: boolean("is_deleted").default(false),
+  assistPlayerId: text("assist_player_id"),
+  metadata: text("metadata"), // JSON string (SQLite has no jsonb)
+  createdAt: text("created_at").$defaultFn(() => new Date().toISOString()),
+  isDeleted: integer("is_deleted", { mode: "boolean" }).default(false),
 });
 
 // Insert schemas

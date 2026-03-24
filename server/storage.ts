@@ -5,8 +5,83 @@ import {
   type Game, type InsertGame,
   type GameEvent, type InsertGameEvent,
   type PlayerBoxScore, type TeamBoxScore,
+  users, teams, players, games, gameEvents,
 } from "@shared/schema";
-import { randomUUID } from "crypto";
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import Database from "better-sqlite3";
+import { eq, and, desc, or, sql } from "drizzle-orm";
+
+// Initialize SQLite database with WAL mode for better performance
+const sqlite = new Database("data.db");
+sqlite.pragma("journal_mode = WAL");
+
+export const db = drizzle(sqlite);
+
+// Create tables if they don't exist (auto-migration)
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    avatar_url TEXT,
+    created_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS teams (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    created_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS players (
+    id TEXT PRIMARY KEY,
+    team_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    position TEXT NOT NULL,
+    is_active INTEGER DEFAULT 1,
+    created_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS games (
+    id TEXT PRIMARY KEY,
+    home_team_id TEXT NOT NULL,
+    away_team_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'setup',
+    game_format TEXT NOT NULL DEFAULT 'quarters',
+    period_length INTEGER NOT NULL DEFAULT 10,
+    current_period INTEGER NOT NULL DEFAULT 1,
+    venue TEXT,
+    game_date TEXT,
+    created_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS game_events (
+    id TEXT PRIMARY KEY,
+    game_id TEXT NOT NULL,
+    player_id TEXT,
+    team_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    quarter INTEGER NOT NULL,
+    game_clock_seconds INTEGER,
+    court_x REAL,
+    court_y REAL,
+    shot_result TEXT,
+    assist_player_id TEXT,
+    metadata TEXT,
+    created_at TEXT,
+    is_deleted INTEGER DEFAULT 0
+  );
+`);
+
+// Seed default user if not exists
+const existingUser = db.select().from(users).where(eq(users.id, "default-user")).get();
+if (!existingUser) {
+  db.insert(users).values({
+    id: "default-user",
+    email: "scorer@swishnstats.com",
+    displayName: "Scorer",
+    avatarUrl: null,
+  }).run();
+}
 
 export interface IStorage {
   // Users
@@ -42,146 +117,118 @@ export interface IStorage {
   getBoxScore(gameId: string, teamId: string): Promise<TeamBoxScore>;
 }
 
-export class MemStorage implements IStorage {
-  private users: Map<string, User> = new Map();
-  private teams: Map<string, Team> = new Map();
-  private players: Map<string, Player> = new Map();
-  private games: Map<string, Game> = new Map();
-  private gameEvents: Map<string, GameEvent> = new Map();
-
-  constructor() {
-    // Create a default user
-    const defaultUser: User = {
-      id: 'default-user',
-      email: 'scorer@swishnstats.com',
-      displayName: 'Scorer',
-      avatarUrl: null,
-      createdAt: new Date(),
-    };
-    this.users.set(defaultUser.id, defaultUser);
-  }
-
+export class DatabaseStorage implements IStorage {
   // Users
   async getUser(id: string): Promise<User | undefined> {
-    return this.users.get(id);
+    return db.select().from(users).where(eq(users.id, id)).get();
   }
 
   async createUser(insertUser: InsertUser): Promise<User> {
-    const id = randomUUID();
-    const user: User = { ...insertUser, id, avatarUrl: insertUser.avatarUrl ?? null, createdAt: new Date() };
-    this.users.set(id, user);
-    return user;
+    return db.insert(users).values({
+      ...insertUser,
+      avatarUrl: insertUser.avatarUrl ?? null,
+    }).returning().get();
   }
 
   // Teams
   async getTeams(userId: string): Promise<Team[]> {
-    return Array.from(this.teams.values()).filter(t => t.userId === userId);
+    return db.select().from(teams).where(eq(teams.userId, userId)).all();
   }
 
   async getTeam(id: string): Promise<Team | undefined> {
-    return this.teams.get(id);
+    return db.select().from(teams).where(eq(teams.id, id)).get();
   }
 
   async createTeam(insertTeam: InsertTeam): Promise<Team> {
-    const id = randomUUID();
-    const team: Team = { ...insertTeam, id, createdAt: new Date() };
-    this.teams.set(id, team);
-    return team;
+    return db.insert(teams).values(insertTeam).returning().get();
   }
 
   async updateTeam(id: string, data: Partial<InsertTeam>): Promise<Team | undefined> {
-    const team = this.teams.get(id);
-    if (!team) return undefined;
-    const updated = { ...team, ...data };
-    this.teams.set(id, updated);
-    return updated;
+    const existing = db.select().from(teams).where(eq(teams.id, id)).get();
+    if (!existing) return undefined;
+    return db.update(teams).set(data).where(eq(teams.id, id)).returning().get();
   }
 
   async deleteTeam(id: string): Promise<boolean> {
-    return this.teams.delete(id);
+    const result = db.delete(teams).where(eq(teams.id, id)).run();
+    return result.changes > 0;
   }
 
   // Players
   async getPlayersByTeam(teamId: string): Promise<Player[]> {
-    return Array.from(this.players.values()).filter(p => p.teamId === teamId);
+    return db.select().from(players).where(eq(players.teamId, teamId)).all();
   }
 
   async getPlayer(id: string): Promise<Player | undefined> {
-    return this.players.get(id);
+    return db.select().from(players).where(eq(players.id, id)).get();
   }
 
   async createPlayer(insertPlayer: InsertPlayer): Promise<Player> {
-    const id = randomUUID();
-    const player: Player = {
+    return db.insert(players).values({
       ...insertPlayer,
-      id,
       isActive: insertPlayer.isActive ?? true,
-      createdAt: new Date(),
-    };
-    this.players.set(id, player);
-    return player;
+    }).returning().get();
   }
 
   async updatePlayer(id: string, data: Partial<InsertPlayer>): Promise<Player | undefined> {
-    const player = this.players.get(id);
-    if (!player) return undefined;
-    const updated = { ...player, ...data };
-    this.players.set(id, updated);
-    return updated;
+    const existing = db.select().from(players).where(eq(players.id, id)).get();
+    if (!existing) return undefined;
+    return db.update(players).set(data).where(eq(players.id, id)).returning().get();
   }
 
   async deletePlayer(id: string): Promise<boolean> {
-    return this.players.delete(id);
+    const result = db.delete(players).where(eq(players.id, id)).run();
+    return result.changes > 0;
   }
 
   // Games
   async getGames(userId: string): Promise<Game[]> {
-    return Array.from(this.games.values())
-      .filter(g => g.userId === userId)
-      .sort((a, b) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0));
+    return db.select().from(games)
+      .where(eq(games.userId, userId))
+      .orderBy(desc(games.createdAt))
+      .all();
   }
 
   async getGame(id: string): Promise<Game | undefined> {
-    return this.games.get(id);
+    return db.select().from(games).where(eq(games.id, id)).get();
   }
 
   async createGame(insertGame: InsertGame): Promise<Game> {
-    const id = randomUUID();
-    const game: Game = {
+    return db.insert(games).values({
       ...insertGame,
-      id,
       status: insertGame.status || 'setup',
       gameFormat: insertGame.gameFormat || 'quarters',
       periodLength: insertGame.periodLength || 10,
       currentPeriod: 1,
       venue: insertGame.venue ?? null,
       gameDate: insertGame.gameDate ?? null,
-      createdAt: new Date(),
-    };
-    this.games.set(id, game);
-    return game;
+    }).returning().get();
   }
 
   async updateGame(id: string, data: Partial<Game>): Promise<Game | undefined> {
-    const game = this.games.get(id);
-    if (!game) return undefined;
-    const updated = { ...game, ...data };
-    this.games.set(id, updated);
-    return updated;
+    const existing = db.select().from(games).where(eq(games.id, id)).get();
+    if (!existing) return undefined;
+    // Remove id from update data to avoid issues
+    const { id: _id, ...updateData } = data;
+    return db.update(games).set(updateData).where(eq(games.id, id)).returning().get();
   }
 
   // Game Events
   async getGameEvents(gameId: string): Promise<GameEvent[]> {
-    return Array.from(this.gameEvents.values())
-      .filter(e => e.gameId === gameId && !e.isDeleted)
-      .sort((a, b) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0));
+    return db.select().from(gameEvents)
+      .where(
+        and(
+          eq(gameEvents.gameId, gameId),
+          eq(gameEvents.isDeleted, false)
+        )
+      )
+      .orderBy(desc(gameEvents.createdAt))
+      .all();
   }
 
   async createGameEvent(insertEvent: InsertGameEvent): Promise<GameEvent> {
-    const id = randomUUID();
-    const event: GameEvent = {
+    return db.insert(gameEvents).values({
       ...insertEvent,
-      id,
       playerId: insertEvent.playerId ?? null,
       gameClockSeconds: insertEvent.gameClockSeconds ?? null,
       courtX: insertEvent.courtX ?? null,
@@ -190,30 +237,36 @@ export class MemStorage implements IStorage {
       assistPlayerId: insertEvent.assistPlayerId ?? null,
       metadata: insertEvent.metadata ?? null,
       isDeleted: false,
-      createdAt: new Date(),
-    };
-    this.gameEvents.set(id, event);
-    return event;
+    }).returning().get();
   }
 
   async softDeleteGameEvent(id: string): Promise<boolean> {
-    const event = this.gameEvents.get(id);
-    if (!event) return false;
-    event.isDeleted = true;
-    this.gameEvents.set(id, event);
-    return true;
+    const result = db.update(gameEvents)
+      .set({ isDeleted: true })
+      .where(eq(gameEvents.id, id))
+      .run();
+    return result.changes > 0;
   }
 
   // Box Score
   async getBoxScore(gameId: string, teamId: string): Promise<TeamBoxScore> {
-    const team = this.teams.get(teamId);
-    const events = Array.from(this.gameEvents.values())
-      .filter(e => e.gameId === gameId && e.teamId === teamId && !e.isDeleted);
-    
-    const teamPlayers = Array.from(this.players.values()).filter(p => p.teamId === teamId);
-    
+    const team = db.select().from(teams).where(eq(teams.id, teamId)).get();
+    const events = db.select().from(gameEvents)
+      .where(
+        and(
+          eq(gameEvents.gameId, gameId),
+          eq(gameEvents.teamId, teamId),
+          eq(gameEvents.isDeleted, false)
+        )
+      )
+      .all();
+
+    const teamPlayers = db.select().from(players)
+      .where(eq(players.teamId, teamId))
+      .all();
+
     const playerStatsMap = new Map<string, PlayerBoxScore>();
-    
+
     for (const player of teamPlayers) {
       playerStatsMap.set(player.id, {
         playerId: player.id,
@@ -300,34 +353,34 @@ export class MemStorage implements IStorage {
       }
     }
 
-    const players = Array.from(playerStatsMap.values());
+    const playersList = Array.from(playerStatsMap.values());
     const totals = {
       minutes: 0,
-      points: players.reduce((s, p) => s + p.points, 0),
-      fgm: players.reduce((s, p) => s + p.fgm, 0),
-      fga: players.reduce((s, p) => s + p.fga, 0),
-      threePm: players.reduce((s, p) => s + p.threePm, 0),
-      threePa: players.reduce((s, p) => s + p.threePa, 0),
-      ftm: players.reduce((s, p) => s + p.ftm, 0),
-      fta: players.reduce((s, p) => s + p.fta, 0),
-      oreb: players.reduce((s, p) => s + p.oreb, 0),
-      dreb: players.reduce((s, p) => s + p.dreb, 0),
-      reb: players.reduce((s, p) => s + p.reb, 0),
-      ast: players.reduce((s, p) => s + p.ast, 0),
-      stl: players.reduce((s, p) => s + p.stl, 0),
-      blk: players.reduce((s, p) => s + p.blk, 0),
-      to: players.reduce((s, p) => s + p.to, 0),
-      pf: players.reduce((s, p) => s + p.pf, 0),
+      points: playersList.reduce((s, p) => s + p.points, 0),
+      fgm: playersList.reduce((s, p) => s + p.fgm, 0),
+      fga: playersList.reduce((s, p) => s + p.fga, 0),
+      threePm: playersList.reduce((s, p) => s + p.threePm, 0),
+      threePa: playersList.reduce((s, p) => s + p.threePa, 0),
+      ftm: playersList.reduce((s, p) => s + p.ftm, 0),
+      fta: playersList.reduce((s, p) => s + p.fta, 0),
+      oreb: playersList.reduce((s, p) => s + p.oreb, 0),
+      dreb: playersList.reduce((s, p) => s + p.dreb, 0),
+      reb: playersList.reduce((s, p) => s + p.reb, 0),
+      ast: playersList.reduce((s, p) => s + p.ast, 0),
+      stl: playersList.reduce((s, p) => s + p.stl, 0),
+      blk: playersList.reduce((s, p) => s + p.blk, 0),
+      to: playersList.reduce((s, p) => s + p.to, 0),
+      pf: playersList.reduce((s, p) => s + p.pf, 0),
       plusMinus: 0,
     };
 
     return {
       teamId,
       teamName: team?.name || 'Unknown',
-      players,
+      players: playersList,
       totals,
     };
   }
 }
 
-export const storage = new MemStorage();
+export const storage = new DatabaseStorage();
