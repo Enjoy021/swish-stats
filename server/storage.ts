@@ -10,9 +10,15 @@ import {
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { eq, and, desc, or, sql } from "drizzle-orm";
+import path from "path";
+
+// Database path: use DATABASE_PATH env var (for Render persistent disk) or default to project root
+const dbPath = process.env.DATABASE_PATH
+  ? path.join(process.env.DATABASE_PATH, "data.db")
+  : "data.db";
 
 // Initialize SQLite database with WAL mode for better performance
-const sqlite = new Database("data.db");
+const sqlite = new Database(dbPath);
 sqlite.pragma("journal_mode = WAL");
 
 export const db = drizzle(sqlite);

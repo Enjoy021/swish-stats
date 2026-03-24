@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: swish-stats
+    runtime: node
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: node dist/index.cjs
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: DATABASE_PATH
+        value: /var/data
+    disk:
+      name: swish-stats-data
+      mountPath: /var/data
+      sizeGB: 1
