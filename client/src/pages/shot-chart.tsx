@@ -8,35 +8,14 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Toggle } from "@/components/ui/toggle";
 import { useToast } from "@/hooks/use-toast";
+import { COURT_ZONES, pointInPolygon, type ShotZone } from "@/lib/court-zones";
+import { CourtFeatures } from "@/components/CourtFeatures";
 import type { Game, Team, Player, GameEvent } from "@shared/schema";
 
 type GameData = Game & {
   homeTeam: Team & { players: Player[] };
   awayTeam: Team & { players: Player[] };
 };
-
-type ShotZone = {
-  id: string;
-  label: string;
-  points: 2 | 3;
-  path: string;
-  x: number;
-  y: number;
-};
-
-const COURT_ZONES: ShotZone[] = [
-  { id: "paint", label: "Paint", points: 2, path: "M 130 200 L 130 320 L 270 320 L 270 200 Z", x: 200, y: 260 },
-  { id: "mid-left", label: "Mid Left", points: 2, path: "M 40 200 L 130 200 L 130 320 L 40 320 Z", x: 85, y: 260 },
-  { id: "mid-right", label: "Mid Right", points: 2, path: "M 270 200 L 360 200 L 360 320 L 270 320 Z", x: 315, y: 260 },
-  { id: "mid-top", label: "Mid Top", points: 2, path: "M 130 120 L 130 200 L 270 200 L 270 120 Z", x: 200, y: 160 },
-  { id: "3pt-left", label: "3PT Left", points: 3, path: "M 0 120 L 40 120 L 40 380 L 0 380 Z", x: 20, y: 250 },
-  { id: "3pt-right", label: "3PT Right", points: 3, path: "M 360 120 L 400 120 L 400 380 L 360 380 Z", x: 380, y: 250 },
-  { id: "3pt-top-left", label: "3PT Top Left", points: 3, path: "M 40 0 L 130 0 L 130 120 L 40 120 Z", x: 85, y: 60 },
-  { id: "3pt-top", label: "3PT Top", points: 3, path: "M 130 0 L 270 0 L 270 120 L 130 120 Z", x: 200, y: 60 },
-  { id: "3pt-top-right", label: "3PT Top Right", points: 3, path: "M 270 0 L 360 0 L 360 120 L 270 120 Z", x: 315, y: 60 },
-  { id: "3pt-corner-left", label: "3PT Corner L", points: 3, path: "M 0 0 L 40 0 L 40 120 L 0 120 Z", x: 20, y: 60 },
-  { id: "3pt-corner-right", label: "3PT Corner R", points: 3, path: "M 360 0 L 400 0 L 400 120 L 360 120 Z", x: 380, y: 60 },
-];
 
 const SHOT_EVENT_TYPES = ["2pt_attempt", "2pt_made", "3pt_attempt", "3pt_made"] as const;
 
@@ -60,26 +39,10 @@ function pct(made: number, attempts: number): string {
 /** Map a shot event to the zone it falls in based on courtX/courtY */
 function getZoneForShot(e: GameEvent): string | null {
   if (e.courtX == null || e.courtY == null) return null;
-  const x = e.courtX;
-  const y = e.courtY;
   for (const zone of COURT_ZONES) {
-    if (pointInZone(x, y, zone)) return zone.id;
+    if (pointInPolygon(e.courtX, e.courtY, zone.polygon)) return zone.id;
   }
   return null;
-}
-
-/** Simple point-in-rect test since all zones are axis-aligned rectangles */
-function pointInZone(x: number, y: number, zone: ShotZone): boolean {
-  // Parse the path to get bounding rect: "M x1 y1 L x2 y2 L x3 y3 L x4 y4 Z"
-  const nums = zone.path.match(/[\d.]+/g)?.map(Number) || [];
-  if (nums.length < 8) return false;
-  const xs = [nums[0], nums[2], nums[4], nums[6]];
-  const ys = [nums[1], nums[3], nums[5], nums[7]];
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  return x >= minX && x <= maxX && y >= minY && y <= maxY;
 }
 
 /** Get heat map color for FG% — red (cold) → yellow → green (hot) */
@@ -422,13 +385,13 @@ export default function ShotChartPage() {
         <Card className="overflow-hidden">
           <div className="bg-gradient-to-b from-[hsl(210,35%,16%)] to-[hsl(220,40%,13%)] p-3">
             <svg
-              viewBox="0 0 400 380"
+              viewBox="0 30 400 320"
               className="w-full"
-              style={{ maxHeight: "320px" }}
+              style={{ maxHeight: "300px" }}
               data-testid="shot-chart-court"
             >
-              {/* Court background */}
-              <rect x="0" y="0" width="400" height="380" fill="hsl(25, 40%, 28%)" rx="4" />
+              {/* Court background — covers the visible region */}
+              <rect x="0" y="30" width="400" height="320" fill="hsl(25, 40%, 28%)" rx="4" />
 
               {/* Heat map zones (behind court lines) */}
               {heatMap && COURT_ZONES.map((zone) => {
@@ -443,19 +406,8 @@ export default function ShotChartPage() {
                 );
               })}
 
-              {/* Court lines */}
-              <rect x="20" y="0" width="360" height="380" fill="none" stroke="white" strokeWidth="1.5" strokeOpacity="0.4" />
-              {/* Half court line */}
-              <line x1="20" y1="0" x2="380" y2="0" stroke="white" strokeWidth="1.5" strokeOpacity="0.4" />
-              {/* Paint */}
-              <rect x="140" y="220" width="120" height="160" fill="none" stroke="white" strokeWidth="1" strokeOpacity="0.35" />
-              {/* Free throw circle */}
-              <circle cx="200" cy="220" r="60" fill="none" stroke="white" strokeWidth="1" strokeOpacity="0.3" />
-              {/* 3-point arc */}
-              <path d="M 40 380 L 40 160 Q 40 20 200 20 Q 360 20 360 160 L 360 380" fill="none" stroke="white" strokeWidth="1" strokeOpacity="0.35" />
-              {/* Basket */}
-              <circle cx="200" cy="340" r="8" fill="none" stroke="white" strokeWidth="1.5" strokeOpacity="0.5" />
-              <rect x="185" y="348" width="30" height="2" fill="white" fillOpacity="0.3" />
+              {/* Court features — shared with live-scoring (memoized) */}
+              <CourtFeatures stroke="white" opacity={0.35} />
 
               {/* Heat map zone labels */}
               {heatMap && COURT_ZONES.map((zone) => {

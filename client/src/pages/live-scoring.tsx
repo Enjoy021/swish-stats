@@ -31,36 +31,14 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { COURT_ZONES, type ShotZone } from "@/lib/court-zones";
+import { CourtFeatures } from "@/components/CourtFeatures";
 import type { Game, Player, Team, GameEvent } from "@shared/schema";
 
 type GameData = Game & {
   homeTeam: Team & { players: Player[] };
   awayTeam: Team & { players: Player[] };
 };
-
-type ShotZone = {
-  id: string;
-  label: string;
-  points: 2 | 3;
-  path: string;
-  x: number;
-  y: number;
-};
-
-// Half-court zones
-const COURT_ZONES: ShotZone[] = [
-  { id: "paint", label: "Paint", points: 2, path: "M 130 200 L 130 320 L 270 320 L 270 200 Z", x: 200, y: 260 },
-  { id: "mid-left", label: "Mid Left", points: 2, path: "M 40 200 L 130 200 L 130 320 L 40 320 Z", x: 85, y: 260 },
-  { id: "mid-right", label: "Mid Right", points: 2, path: "M 270 200 L 360 200 L 360 320 L 270 320 Z", x: 315, y: 260 },
-  { id: "mid-top", label: "Mid Top", points: 2, path: "M 130 120 L 130 200 L 270 200 L 270 120 Z", x: 200, y: 160 },
-  { id: "3pt-left", label: "3PT Left", points: 3, path: "M 0 120 L 40 120 L 40 380 L 0 380 Z", x: 20, y: 250 },
-  { id: "3pt-right", label: "3PT Right", points: 3, path: "M 360 120 L 400 120 L 400 380 L 360 380 Z", x: 380, y: 250 },
-  { id: "3pt-top-left", label: "3PT Top Left", points: 3, path: "M 40 0 L 130 0 L 130 120 L 40 120 Z", x: 85, y: 60 },
-  { id: "3pt-top", label: "3PT Top", points: 3, path: "M 130 0 L 270 0 L 270 120 L 130 120 Z", x: 200, y: 60 },
-  { id: "3pt-top-right", label: "3PT Top Right", points: 3, path: "M 270 0 L 360 0 L 360 120 L 270 120 Z", x: 315, y: 60 },
-  { id: "3pt-corner-left", label: "3PT Corner L", points: 3, path: "M 0 0 L 40 0 L 40 120 L 0 120 Z", x: 20, y: 60 },
-  { id: "3pt-corner-right", label: "3PT Corner R", points: 3, path: "M 360 0 L 400 0 L 400 120 L 360 120 Z", x: 380, y: 60 },
-];
 
 const TURNOVER_TYPES = [
   "Bad Pass", "Travel", "Ball Handling", "Shot Clock",
@@ -166,7 +144,7 @@ export default function LiveScoringPage() {
   // Fetch events
   const { data: events = [] } = useQuery<GameEvent[]>({
     queryKey: ["/api/games", gameId, "events"],
-    refetchInterval: 2000,
+    refetchInterval: 10000,
   });
 
   // Calculate score from events
@@ -216,6 +194,39 @@ export default function LiveScoringPage() {
   useEffect(() => {
     setShowPauseOverlay(game?.status === "paused");
   }, [game?.status]);
+
+  // Running game clock — ticks down while status === "live"
+  useEffect(() => {
+    if (game?.status !== "live") return;
+    const interval = setInterval(() => {
+      setGameClockSeconds((s) => {
+        if (s > 0) return s - 1;
+        // s === 0: borrow from minutes
+        let borrowed = false;
+        setGameClockMinutes((m) => {
+          if (m > 0) { borrowed = true; return m - 1; }
+          return 0;
+        });
+        return borrowed ? 59 : 0;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [game?.status]);
+
+  // Auto-pause when clock reaches 0:00 during live play; the context-aware pause overlay
+  // (rendered below) handles the Next Period / End Game / Overtime CTA.
+  useEffect(() => {
+    if (game?.status === "live" && gameClockMinutes === 0 && gameClockSeconds === 0) {
+      const tp = game.gameFormat === "halves" ? 2 : 4;
+      const currentP = game.currentPeriod || 1;
+      const isOT = currentP > tp;
+      const periodLabel = isOT
+        ? `OT${currentP - tp}`
+        : (game.gameFormat === "halves" ? `H${currentP}` : `Q${currentP}`);
+      updateGame.mutate({ status: "paused" });
+      toast({ title: `End of ${periodLabel}`, duration: 2000 });
+    }
+  }, [gameClockMinutes, gameClockSeconds, game?.status, game?.gameFormat, game?.currentPeriod]);
 
   // Shot indicators from events
   const shotIndicators = useMemo(() => {
@@ -287,8 +298,26 @@ export default function LiveScoringPage() {
     [currentTeam, currentOnCourt]
   );
 
-  // Handle court zone tap — allow zone-first, then player selection
-  const handleZoneTap = (zone: ShotZone) => {
+  // Captured tap location (in SVG coords) — used so shots plot where the user
+  // actually tapped, not at the zone's center.
+  const [tapPoint, setTapPoint] = useState<{ x: number; y: number } | null>(null);
+
+  // Convert a click event's screen coords into SVG viewBox coords.
+  const getTapPoint = (evt: React.MouseEvent<SVGPathElement>): { x: number; y: number } => {
+    const svg = evt.currentTarget.ownerSVGElement;
+    const ctm = svg?.getScreenCTM();
+    if (!svg || !ctm) return { x: 0, y: 0 };
+    const pt = svg.createSVGPoint();
+    pt.x = evt.clientX;
+    pt.y = evt.clientY;
+    const p = pt.matrixTransform(ctm.inverse());
+    return { x: p.x, y: p.y };
+  };
+
+  // Handle court zone tap — capture exact tap location, then route by flow
+  const handleZoneTap = (zone: ShotZone, evt: React.MouseEvent<SVGPathElement>) => {
+    const point = getTapPoint(evt);
+    setTapPoint(point);
     if (!selectedPlayer) {
       // Zone-first flow: store zone and show shooter selection sheet
       setPendingZone(zone);
@@ -299,14 +328,38 @@ export default function LiveScoringPage() {
     setShowShotPrompt(true);
   };
 
-  // Handle shooter selection from the zone-first flow
-  const handleShooterSelected = (player: Player) => {
+  // Zone-first flow with inline result — one tap records shooter + made/missed in a single action
+  const handleShooterAndResult = (player: Player, made: boolean) => {
+    if (!pendingZone || !currentTeamId) return;
+    const zone = pendingZone;
+    const point = tapPoint ?? { x: zone.x, y: zone.y };
     setSelectedPlayer(player);
     setShowShooterSelect(false);
-    if (pendingZone) {
-      setSelectedZone(pendingZone);
-      setPendingZone(null);
-      setShowShotPrompt(true);
+    setPendingZone(null);
+    setTapPoint(null);
+    const eventType = zone.points === 3
+      ? (made ? "3pt_made" : "3pt_attempt")
+      : (made ? "2pt_made" : "2pt_attempt");
+    addEvent.mutate({
+      playerId: player.id,
+      teamId: currentTeamId,
+      eventType,
+      courtX: point.x,
+      courtY: point.y,
+      shotResult: made ? "made" : "missed",
+      metadata: { zone: zone.label },
+    });
+    if (made) {
+      toast({ title: `+${zone.points} ${getPlayerLabel(player)}`, duration: 1500 });
+      setLastScoringEvent({ teamId: currentTeamId, playerId: player.id });
+      setLastMissEvent(null);
+      setScoreAnimating(activeTeam);
+      setTimeout(() => setScoreAnimating(null), 400);
+      setTimeout(() => setShowAssistPrompt(true), 300);
+    } else {
+      setLastMissEvent({ teamId: currentTeamId });
+      setLastScoringEvent(null);
+      setTimeout(() => setShowReboundPrompt(true), 300);
     }
   };
 
@@ -332,6 +385,7 @@ export default function LiveScoringPage() {
   // Record shot
   const recordShot = (made: boolean) => {
     if (!selectedPlayer || !selectedZone || !currentTeamId) return;
+    const point = tapPoint ?? { x: selectedZone.x, y: selectedZone.y };
     const eventType = selectedZone.points === 3
       ? (made ? "3pt_made" : "3pt_attempt")
       : (made ? "2pt_made" : "2pt_attempt");
@@ -340,14 +394,15 @@ export default function LiveScoringPage() {
       playerId: selectedPlayer.id,
       teamId: currentTeamId,
       eventType,
-      courtX: selectedZone.x,
-      courtY: selectedZone.y,
+      courtX: point.x,
+      courtY: point.y,
       shotResult: made ? "made" : "missed",
       metadata: { zone: selectedZone.label },
     });
 
     setShowShotPrompt(false);
     setSelectedZone(null);
+    setTapPoint(null);
 
     if (made) {
       const pts = selectedZone.points;
@@ -615,18 +670,19 @@ export default function LiveScoringPage() {
     return "text-muted-foreground";
   };
 
-  // Group events by quarter
+  // Group events by quarter. Events are returned newest-first, so interleaved
+  // periods are possible if the user retroactively edits — merge into one group
+  // per period to keep React keys unique.
   const groupedEvents = useMemo(() => {
-    const groups: { period: number; events: GameEvent[] }[] = [];
-    let currentPeriod = -1;
+    const byPeriod = new Map<number, GameEvent[]>();
     for (const event of events) {
-      if (event.quarter !== currentPeriod) {
-        currentPeriod = event.quarter;
-        groups.push({ period: currentPeriod, events: [] });
-      }
-      groups[groups.length - 1].events.push(event);
+      const arr = byPeriod.get(event.quarter) ?? [];
+      arr.push(event);
+      byPeriod.set(event.quarter, arr);
     }
-    return groups;
+    return Array.from(byPeriod.entries())
+      .sort((a, b) => b[0] - a[0])
+      .map(([period, evs]) => ({ period, events: evs }));
   }, [events]);
 
   if (gameLoading) {
@@ -668,7 +724,9 @@ export default function LiveScoringPage() {
               {game.status?.toUpperCase()}
             </Badge>
             <Badge variant="outline" className="text-[10px] border-white/30 text-white/80">
-              {isOvertime ? `OT${(game.currentPeriod || 1) - totalPeriods}` : `${game.gameFormat === "halves" ? "H" : "Q"}${game.currentPeriod}`}
+              {isOvertime
+                ? `OT${(game.currentPeriod || 1) - totalPeriods}`
+                : `${game.gameFormat === "halves" ? "H" : "Q"}${game.currentPeriod} / ${totalPeriods}`}
             </Badge>
           </div>
           <Link href={`/games/${gameId}/boxscore`}>
@@ -760,8 +818,18 @@ export default function LiveScoringPage() {
               variant="ghost"
               className="h-8 px-3 text-white/60 hover:text-white hover:bg-white/10"
               onClick={() => {
-                if (game.status === "live") updateGame.mutate({ status: "paused" });
-                else updateGame.mutate({ status: "live" });
+                if (game.status === "live") {
+                  updateGame.mutate({ status: "paused" });
+                } else if (gameClockMinutes === 0 && gameClockSeconds === 0) {
+                  // Can't resume at 0:00 — push to period dialog instead
+                  if ((game.currentPeriod || 1) < totalPeriods) {
+                    setShowNextPeriodConfirm(true);
+                  } else {
+                    setShowEndGameConfirm(true);
+                  }
+                } else {
+                  updateGame.mutate({ status: "live" });
+                }
               }}
               data-testid="button-pause-resume"
             >
@@ -855,7 +923,7 @@ export default function LiveScoringPage() {
                     data-testid={`chip-bench-${player.id}`}
                   >
                     <span className="font-bold">#{player.number}</span>
-                    <span>{player.name.split(" ").pop()}</span>
+                    <span>{player.name.split(" ")[0]?.[0]}. {player.name.split(" ").slice(1).join(" ") || player.name.split(" ")[0]}</span>
                     {fouls > 0 && (
                       <span className={`text-[8px] font-bold rounded-full w-3.5 h-3.5 flex items-center justify-center ${
                         fouls >= 5 ? "bg-red-800 text-white" : fouls >= 4 ? "bg-red-500 text-white" : "bg-yellow-500/20 text-yellow-600"
@@ -869,81 +937,81 @@ export default function LiveScoringPage() {
         )}
       </div>
 
-      {/* Court View */}
+      {/* Court View — basketball-correct half court (basket at bottom) */}
       <div className="flex-1 overflow-hidden px-3 py-2">
-        <svg viewBox="0 0 400 380" className="w-full max-w-md mx-auto" style={{ maxHeight: "260px" }}>
+        <svg viewBox="0 30 400 320" className="w-full max-w-md mx-auto" style={{ maxHeight: "280px" }}>
           {/* Court background */}
-          <rect x="0" y="0" width="400" height="380" fill="hsl(var(--muted))" rx="8" opacity="0.3" />
+          <rect x="0" y="30" width="400" height="320" fill="hsl(var(--muted))" rx="6" opacity="0.3" />
 
-          {/* Court lines */}
-          <rect x="5" y="5" width="390" height="370" fill="none" stroke="hsl(var(--border))" strokeWidth="1.5" rx="4" />
-
-          {/* 3-point arc */}
-          <path d="M 40 380 L 40 200 Q 40 80 200 60 Q 360 80 360 200 L 360 380" fill="none" stroke="hsl(var(--border))" strokeWidth="1" strokeDasharray="4 2" />
-
-          {/* Paint */}
-          <rect x="130" y="200" width="140" height="120" fill="none" stroke="hsl(var(--border))" strokeWidth="1" />
-
-          {/* Free throw circle */}
-          <circle cx="200" cy="200" r="40" fill="none" stroke="hsl(var(--border))" strokeWidth="0.8" strokeDasharray="3 2" />
-
-          {/* Basket */}
-          <circle cx="200" cy="340" r="6" fill="none" stroke="hsl(17 100% 60%)" strokeWidth="1.5" />
-          <rect x="180" y="346" width="40" height="4" fill="hsl(var(--border))" />
-
-          {/* Shot indicators */}
-          {shotIndicators.map((shot, i) => (
-            shot.made ? (
-              <circle
-                key={`shot-${i}`}
-                cx={shot.x}
-                cy={shot.y}
-                r="4"
-                fill={shot.teamId === game.homeTeamId ? "hsl(142,71%,45%)" : "hsl(180,50%,40%)"}
-                opacity="0.6"
-              />
-            ) : (
-              <g key={`shot-${i}`}>
-                <line x1={shot.x - 3} y1={shot.y - 3} x2={shot.x + 3} y2={shot.y + 3} stroke="hsl(0,84%,60%)" strokeWidth="1.5" opacity="0.5" />
-                <line x1={shot.x + 3} y1={shot.y - 3} x2={shot.x - 3} y2={shot.y + 3} stroke="hsl(0,84%,60%)" strokeWidth="1.5" opacity="0.5" />
-              </g>
-            )
-          ))}
-
-          {/* Tappable zones */}
+          {/* Tappable zone polygons (drawn first so court lines render on top) */}
           {COURT_ZONES.map((zone) => (
             <path
               key={zone.id}
               d={zone.path}
-              fill={selectedZone?.id === zone.id ? "hsl(17 100% 60% / 0.25)" : "hsl(var(--muted-foreground) / 0.04)"}
-              stroke="hsl(var(--border))"
-              strokeWidth="0.5"
-              strokeOpacity="0.3"
-              className="cursor-pointer hover:fill-[hsl(17_100%_60%_/_0.1)] active:fill-[hsl(17_100%_60%_/_0.2)] transition-colors"
-              onClick={() => handleZoneTap(zone)}
+              fill={selectedZone?.id === zone.id ? "hsl(17 100% 60% / 0.28)" : "hsl(var(--muted-foreground) / 0.04)"}
+              stroke="none"
+              className="cursor-pointer hover:fill-[hsl(17_100%_60%_/_0.12)] active:fill-[hsl(17_100%_60%_/_0.22)] transition-colors"
+              onClick={(evt) => handleZoneTap(zone, evt)}
               data-testid={`zone-${zone.id}`}
             >
               <title>{zone.label} ({zone.points}PT)</title>
             </path>
           ))}
 
-          {/* Zone labels */}
-          {COURT_ZONES.map((zone) => (
-            <text
-              key={`label-${zone.id}`}
-              x={zone.x}
-              y={zone.y}
-              textAnchor="middle"
-              dominantBaseline="middle"
-              fontSize="11"
-              fontWeight="600"
-              fill="hsl(var(--muted-foreground))"
-              className="pointer-events-none select-none"
-              opacity="0.8"
-            >
-              {zone.points === 3 ? "3" : "2"}
-            </text>
+          {/* Court lines — drawn on top of zones (memoized, doesn't re-render on clock ticks) */}
+          <CourtFeatures />
+
+          {/* Existing shot indicators */}
+          {shotIndicators.map((shot, i) => (
+            shot.made ? (
+              <circle
+                key={`shot-${i}`}
+                cx={shot.x}
+                cy={shot.y}
+                r="3.5"
+                fill={shot.teamId === game.homeTeamId ? "hsl(142,71%,45%)" : "hsl(180,50%,40%)"}
+                opacity="0.65"
+              />
+            ) : (
+              <g key={`shot-${i}`}>
+                <line x1={shot.x - 3} y1={shot.y - 3} x2={shot.x + 3} y2={shot.y + 3} stroke="hsl(0,84%,60%)" strokeWidth="1.5" opacity="0.55" />
+                <line x1={shot.x + 3} y1={shot.y - 3} x2={shot.x - 3} y2={shot.y + 3} stroke="hsl(0,84%,60%)" strokeWidth="1.5" opacity="0.55" />
+              </g>
+            )
           ))}
+
+          {/* Zone labels — name + point value (smaller font for narrow corner-3 strips) */}
+          {COURT_ZONES.map((zone) => {
+            const isCorner = zone.id === "left-corner-3" || zone.id === "right-corner-3";
+            return (
+              <g key={`label-${zone.id}`} className="pointer-events-none select-none">
+                <text
+                  x={zone.x}
+                  y={zone.y - (isCorner ? 8 : 4)}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  fontSize={isCorner ? 6.5 : 9}
+                  fontWeight="600"
+                  fill="hsl(var(--foreground))"
+                  opacity="0.75"
+                >
+                  {zone.shortLabel}
+                </text>
+                <text
+                  x={zone.x}
+                  y={zone.y + (isCorner ? 2 : 7)}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  fontSize={isCorner ? 5.5 : 7.5}
+                  fontWeight="500"
+                  fill={zone.points === 3 ? "hsl(17 100% 60%)" : "hsl(var(--muted-foreground))"}
+                  opacity="0.75"
+                >
+                  {zone.points}PT
+                </text>
+              </g>
+            );
+          })}
         </svg>
       </div>
 
@@ -985,9 +1053,9 @@ export default function LiveScoringPage() {
       {/* Action Buttons */}
       <div className="px-3 py-2 border-t border-border">
         <div className="max-w-md mx-auto space-y-1.5">
-          {/* Scoring / Play row */}
-          <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-medium">Scoring / Play</p>
-          <div className="grid grid-cols-4 gap-1.5">
+          {/* Plays row — all in-play stat actions together */}
+          <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-medium">Plays</p>
+          <div className="grid grid-cols-5 gap-1.5">
             <Button
               variant="outline"
               size="sm"
@@ -1010,28 +1078,6 @@ export default function LiveScoringPage() {
               variant="outline"
               size="sm"
               className="h-12 text-xs font-semibold active:scale-95 transition-transform"
-              onClick={() => { if (selectedPlayer) setShowTurnoverPrompt(true); else toast({ title: "Select a player", variant: "destructive" }); }}
-              data-testid="button-to"
-            >
-              TO
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-12 text-xs font-semibold active:scale-95 transition-transform"
-              onClick={() => { if (selectedPlayer) setShowFoulPrompt(true); else toast({ title: "Select a player", variant: "destructive" }); }}
-              data-testid="button-foul"
-            >
-              FOUL
-            </Button>
-          </div>
-          {/* Other row */}
-          <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-medium pt-0.5">Other</p>
-          <div className="grid grid-cols-3 gap-1.5">
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-10 text-xs font-semibold active:scale-95 transition-transform"
               onClick={() => {
                 if (!selectedPlayer || !currentTeamId) { toast({ title: "Select a player", variant: "destructive" }); return; }
                 addEvent.mutate({
@@ -1049,21 +1095,42 @@ export default function LiveScoringPage() {
             <Button
               variant="outline"
               size="sm"
+              className="h-12 text-xs font-semibold active:scale-95 transition-transform"
+              onClick={() => { if (selectedPlayer) setShowTurnoverPrompt(true); else toast({ title: "Select a player", variant: "destructive" }); }}
+              data-testid="button-to"
+            >
+              TO
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-12 text-xs font-semibold active:scale-95 transition-transform"
+              onClick={() => { if (selectedPlayer) setShowFoulPrompt(true); else toast({ title: "Select a player", variant: "destructive" }); }}
+              data-testid="button-foul"
+            >
+              FOUL
+            </Button>
+          </div>
+          {/* Roster / meta row — SUB takes weight, UNDO gets its own destructive treatment */}
+          <div className="grid grid-cols-[1fr_auto] gap-1.5 pt-0.5">
+            <Button
+              variant="outline"
+              size="sm"
               className="h-10 text-xs font-semibold active:scale-95 transition-transform"
               onClick={() => setShowSubPrompt(true)}
               data-testid="button-sub"
             >
-              <ArrowRightLeft className="w-3.5 h-3.5 mr-1" /> SUB
+              <ArrowRightLeft className="w-3.5 h-3.5 mr-1.5" /> Substitution
             </Button>
             <Button
-              variant="ghost"
+              variant="outline"
               size="sm"
-              className="h-10 text-[10px] font-medium text-destructive hover:bg-destructive/10 active:scale-95 transition-transform"
+              className="h-10 px-4 text-[11px] font-semibold text-destructive border-destructive/30 hover:bg-destructive/10 active:scale-95 transition-transform"
               onClick={() => { if (events.length > 0) undoEvent.mutate(events[0].id); }}
               disabled={events.length === 0}
               data-testid="button-undo"
             >
-              <Undo2 className="w-3 h-3 mr-1" /> UNDO
+              <Undo2 className="w-3.5 h-3.5 mr-1" /> Undo
             </Button>
           </div>
         </div>
@@ -1149,49 +1216,73 @@ export default function LiveScoringPage() {
         </SheetContent>
       </Sheet>
 
-      {/* Shooter Selection Sheet (Fix 1: zone-first flow) */}
+      {/* Shooter Selection Sheet — combined shooter + made/missed in one tap */}
       <Sheet open={showShooterSelect} onOpenChange={(v) => { setShowShooterSelect(v); if (!v) setPendingZone(null); }}>
         <SheetContent side="bottom" className="rounded-t-2xl px-4 pb-8 max-h-[80vh]">
-          <SheetHeader className="mb-3">
+          <SheetHeader className="mb-2">
             <SheetTitle className="text-center">
-              {pendingZone?.points === 3 ? "3-Point Shot" : "2-Point Shot"} — {pendingZone?.label}
+              {pendingZone?.points === 3 ? "3PT" : "2PT"} — {pendingZone?.label}
             </SheetTitle>
-            <SheetDescription className="text-center text-xs">Select the shooter</SheetDescription>
+            <SheetDescription className="text-center text-xs">
+              Tap a player on the <span className="text-[hsl(142,71%,45%)] font-semibold">left</span> to record a make, the <span className="text-destructive font-semibold">×</span> on the right for a miss
+            </SheetDescription>
           </SheetHeader>
-          <div className="space-y-2 overflow-y-auto max-h-[50vh]">
+          <div className="space-y-1.5 overflow-y-auto max-h-[55vh]">
             <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">On Court</p>
             {onCourtPlayers.map((player) => (
-              <Button
-                key={`shooter-${player.id}`}
-                variant="outline"
-                className="w-full h-12 justify-start gap-2 font-medium active:scale-95 transition-transform"
-                onClick={() => handleShooterSelected(player)}
-                data-testid={`button-shooter-${player.id}`}
-              >
-                <span className="font-bold text-primary">#{player.number}</span>
-                <span>{player.name}</span>
-              </Button>
+              <div key={`shooter-${player.id}`} className="flex gap-1.5">
+                <Button
+                  variant="outline"
+                  className="flex-1 h-12 justify-start gap-2 font-medium active:scale-95 transition-transform hover:bg-[hsl(142,71%,45%)]/10 hover:border-[hsl(142,71%,45%)]/50"
+                  onClick={() => handleShooterAndResult(player, true)}
+                  data-testid={`button-shooter-${player.id}`}
+                >
+                  <span className="font-bold text-primary">#{player.number}</span>
+                  <span>{player.name}</span>
+                  <span className="ml-auto text-[hsl(142,71%,45%)] font-bold text-sm">+{pendingZone?.points ?? 2}</span>
+                </Button>
+                <Button
+                  variant="outline"
+                  className="h-12 w-12 shrink-0 text-destructive border-destructive/30 hover:bg-destructive/10 active:scale-95 transition-transform font-bold"
+                  onClick={() => handleShooterAndResult(player, false)}
+                  data-testid={`button-shooter-miss-${player.id}`}
+                  aria-label={`Record miss for ${player.name}`}
+                >
+                  <X className="w-4 h-4" />
+                </Button>
+              </div>
             ))}
             {benchPlayers.length > 0 && (
               <>
                 <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mt-3">Bench</p>
                 {benchPlayers.map((player) => (
-                  <Button
-                    key={`shooter-bench-${player.id}`}
-                    variant="outline"
-                    className="w-full h-10 justify-start gap-2 text-sm text-muted-foreground active:scale-95 transition-transform"
-                    onClick={() => handleShooterSelected(player)}
-                    data-testid={`button-shooter-bench-${player.id}`}
-                  >
-                    <span className="font-bold">#{player.number}</span>
-                    <span>{player.name}</span>
-                  </Button>
+                  <div key={`shooter-bench-${player.id}`} className="flex gap-1.5">
+                    <Button
+                      variant="outline"
+                      className="flex-1 h-10 justify-start gap-2 text-sm text-muted-foreground active:scale-95 transition-transform"
+                      onClick={() => handleShooterAndResult(player, true)}
+                      data-testid={`button-shooter-bench-${player.id}`}
+                    >
+                      <span className="font-bold">#{player.number}</span>
+                      <span>{player.name}</span>
+                      <span className="ml-auto text-[hsl(142,71%,45%)] font-bold text-xs">+{pendingZone?.points ?? 2}</span>
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="h-10 w-10 shrink-0 text-destructive border-destructive/30 hover:bg-destructive/10 active:scale-95 transition-transform"
+                      onClick={() => handleShooterAndResult(player, false)}
+                      data-testid={`button-shooter-bench-miss-${player.id}`}
+                      aria-label={`Record miss for ${player.name}`}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </Button>
+                  </div>
                 ))}
               </>
             )}
             <Button
               variant="ghost"
-              className="w-full h-10 text-muted-foreground"
+              className="w-full h-10 text-muted-foreground mt-2"
               onClick={() => { setShowShooterSelect(false); setPendingZone(null); }}
               data-testid="button-cancel-shooter"
             >
@@ -1447,28 +1538,68 @@ export default function LiveScoringPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Pause Overlay */}
-      {showPauseOverlay && (
-        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center">
-          <div className="text-center text-white space-y-4">
-            <p className="text-3xl font-bold">Game Paused</p>
-            <p className="text-white/60 text-sm">
-              {getPeriodLabel(game.currentPeriod || 1)} — {homeScore} : {awayScore}
-            </p>
-            <Button
-              size="lg"
-              className="bg-[hsl(142,71%,45%)] hover:bg-[hsl(142,71%,35%)] text-white h-14 px-8 text-lg font-bold active:scale-95 transition-transform"
-              onClick={() => {
-                updateGame.mutate({ status: "live" });
-                setShowPauseOverlay(false);
-              }}
-              data-testid="button-resume-game"
-            >
-              <Play className="w-5 h-5 mr-2" /> Resume
-            </Button>
+      {/* Pause Overlay — context-aware: end-of-period vs mid-period */}
+      {showPauseOverlay && (() => {
+        const atZero = gameClockMinutes === 0 && gameClockSeconds === 0;
+        const currentP = game.currentPeriod || 1;
+        const hasMorePeriods = currentP < totalPeriods;
+        return (
+          <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center">
+            <div className="text-center text-white space-y-4 max-w-xs px-6">
+              <p className="text-3xl font-bold">
+                {atZero ? `End of ${getPeriodLabel(currentP)}` : "Game Paused"}
+              </p>
+              <p className="text-white/60 text-sm">
+                {getPeriodLabel(currentP)} — {homeScore} : {awayScore}
+              </p>
+              {atZero ? (
+                <div className="space-y-2">
+                  <Button
+                    size="lg"
+                    className="bg-[hsl(17,100%,60%)] hover:bg-[hsl(17,100%,50%)] text-white h-14 w-full text-lg font-bold active:scale-95 transition-transform"
+                    onClick={() => {
+                      setShowPauseOverlay(false);
+                      if (hasMorePeriods) {
+                        // Advance directly — user already confirmed by clicking this button
+                        handleNextPeriod();
+                      } else {
+                        setShowEndGameConfirm(true);
+                      }
+                    }}
+                    data-testid="button-overlay-next-period"
+                  >
+                    {hasMorePeriods
+                      ? `Start ${getPeriodLabel(currentP + 1)}`
+                      : homeScore === awayScore
+                        ? "Overtime / End Game"
+                        : "End Game"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="text-white/70 hover:text-white hover:bg-white/10 w-full"
+                    onClick={() => setShowPauseOverlay(false)}
+                    data-testid="button-overlay-dismiss"
+                  >
+                    Adjust clock first
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  size="lg"
+                  className="bg-[hsl(142,71%,45%)] hover:bg-[hsl(142,71%,35%)] text-white h-14 px-8 text-lg font-bold active:scale-95 transition-transform"
+                  onClick={() => {
+                    updateGame.mutate({ status: "live" });
+                    setShowPauseOverlay(false);
+                  }}
+                  data-testid="button-resume-game"
+                >
+                  <Play className="w-5 h-5 mr-2" /> Resume
+                </Button>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

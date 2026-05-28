@@ -123,6 +123,18 @@ export interface IStorage {
   getBoxScore(gameId: string, teamId: string): Promise<TeamBoxScore>;
 }
 
+// metadata is stored as JSON text in SQLite; deserialize to an object for clients.
+// Tolerates rows where the column was already set to a plain string in the past.
+function parseEventMetadata(row: GameEvent): GameEvent {
+  if (row.metadata == null) return row;
+  if (typeof row.metadata !== "string") return row;
+  try {
+    return { ...row, metadata: JSON.parse(row.metadata) };
+  } catch {
+    return row;
+  }
+}
+
 export class DatabaseStorage implements IStorage {
   // Users
   async getUser(id: string): Promise<User | undefined> {
@@ -221,7 +233,7 @@ export class DatabaseStorage implements IStorage {
 
   // Game Events
   async getGameEvents(gameId: string): Promise<GameEvent[]> {
-    return db.select().from(gameEvents)
+    const rows = db.select().from(gameEvents)
       .where(
         and(
           eq(gameEvents.gameId, gameId),
@@ -230,10 +242,14 @@ export class DatabaseStorage implements IStorage {
       )
       .orderBy(desc(gameEvents.createdAt))
       .all();
+    return rows.map(parseEventMetadata);
   }
 
   async createGameEvent(insertEvent: InsertGameEvent): Promise<GameEvent> {
-    return db.insert(gameEvents).values({
+    const meta = insertEvent.metadata;
+    const metadataStr: string | null =
+      meta == null ? null : (typeof meta === "string" ? meta : JSON.stringify(meta));
+    const row = db.insert(gameEvents).values({
       ...insertEvent,
       playerId: insertEvent.playerId ?? null,
       gameClockSeconds: insertEvent.gameClockSeconds ?? null,
@@ -241,9 +257,10 @@ export class DatabaseStorage implements IStorage {
       courtY: insertEvent.courtY ?? null,
       shotResult: insertEvent.shotResult ?? null,
       assistPlayerId: insertEvent.assistPlayerId ?? null,
-      metadata: insertEvent.metadata ?? null,
+      metadata: metadataStr,
       isDeleted: false,
     }).returning().get();
+    return parseEventMetadata(row);
   }
 
   async softDeleteGameEvent(id: string): Promise<boolean> {

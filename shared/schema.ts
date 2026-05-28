@@ -88,7 +88,13 @@ export const insertUserSchema = createInsertSchema(users).omit({ id: true, creat
 export const insertTeamSchema = createInsertSchema(teams).omit({ id: true, createdAt: true });
 export const insertPlayerSchema = createInsertSchema(players).omit({ id: true, createdAt: true });
 export const insertGameSchema = createInsertSchema(games).omit({ id: true, createdAt: true, currentPeriod: true });
-export const insertGameEventSchema = createInsertSchema(gameEvents).omit({ id: true, createdAt: true, isDeleted: true });
+export const insertGameEventSchema = createInsertSchema(gameEvents)
+  .omit({ id: true, createdAt: true, isDeleted: true })
+  .extend({
+    // metadata is stored as JSON text in SQLite, but accept either an object or a string
+    // on the wire. Storage layer normalizes to a string before insert.
+    metadata: z.union([z.string(), z.record(z.any())]).nullable().optional(),
+  });
 
 // Types
 export type InsertUser = z.infer<typeof insertUserSchema>;
@@ -100,7 +106,10 @@ export type Player = typeof players.$inferSelect;
 export type InsertGame = z.infer<typeof insertGameSchema>;
 export type Game = typeof games.$inferSelect;
 export type InsertGameEvent = z.infer<typeof insertGameEventSchema>;
-export type GameEvent = typeof gameEvents.$inferSelect;
+// metadata is stored as JSON text in SQLite but normalized to an object at the API boundary
+export type GameEvent = Omit<typeof gameEvents.$inferSelect, "metadata"> & {
+  metadata: Record<string, any> | string | null;
+};
 
 // Box score stat type
 export interface PlayerBoxScore {
